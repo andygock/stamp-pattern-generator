@@ -94,12 +94,14 @@ label {
 
 input,
 select,
+textarea,
 button {
   font: inherit;
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 32px;
   border: 1px solid var(--line);
@@ -110,8 +112,13 @@ select {
   outline: none;
 }
 
+textarea {
+  resize: vertical;
+}
+
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--accent);
 }
 
@@ -149,7 +156,8 @@ input[type="checkbox"] {
 }
 
 .compact-field input,
-.compact-field select {
+.compact-field select,
+.compact-field textarea {
   min-height: 30px;
   padding: 5px 8px;
 }

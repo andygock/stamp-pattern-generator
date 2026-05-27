@@ -7,10 +7,12 @@ const APP_CONFIG = {
     autoFont: true,
     fontSize: 8,
     tracking: 0,
+    lineSpacing: 1.0,
     fontChoice: "roboto",
+    textAlign: "center",
   },
   ranges: {
-    textMaxLength: 8,
+    textMaxLength: 200,
     padMin: 1,
     padMax: 1000,
     bleedMin: 0,
@@ -20,6 +22,9 @@ const APP_CONFIG = {
     trackingMin: -50,
     trackingMax: 50,
     trackingStep: 0.05,
+    lineSpacingMin: 0.5,
+    lineSpacingMax: 5,
+    lineSpacingStep: 0.1,
   },
   fonts: {
     roboto: {
@@ -61,7 +66,9 @@ const els = {
   autoFont: document.getElementById("autoFont"),
   fontSize: document.getElementById("fontSize"),
   tracking: document.getElementById("tracking"),
+  lineSpacing: document.getElementById("lineSpacing"),
   fontChoice: document.getElementById("fontChoice"),
+  textAlign: document.getElementById("textAlign"),
   preview: document.getElementById("preview"),
   status: document.getElementById("status"),
   dims: document.getElementById("dims"),
@@ -108,7 +115,13 @@ function applyDefaults() {
   els.tracking.max = String(ranges.trackingMax);
   els.tracking.step = String(ranges.trackingStep);
 
+  els.lineSpacing.value = String(defaults.lineSpacing);
+  els.lineSpacing.min = String(ranges.lineSpacingMin);
+  els.lineSpacing.max = String(ranges.lineSpacingMax);
+  els.lineSpacing.step = String(ranges.lineSpacingStep);
+
   els.fontChoice.value = defaults.fontChoice;
+  els.textAlign.value = defaults.textAlign;
   els.fontSize.disabled = defaults.autoFont;
 }
 
@@ -176,20 +189,46 @@ function getTextPath(
   text,
   fontSize,
   tracking,
+  lineSpacing,
+  align = "center",
   originX = 0,
   baselineY = 0,
 ) {
   const scale = fontSize / font.unitsPerEm;
-  let x = originX;
+  const lines = text.split(/\r?\n/);
+  const lineHeight = fontSize * lineSpacing;
   const commands = [];
 
-  // Convert each glyph into vector outlines so the result can be used in laser/CAD software.
-  const glyphs = font.stringToGlyphs(text);
-  glyphs.forEach((glyph, index) => {
-    const glyphPath = glyph.getPath(x, baselineY, fontSize);
-    commands.push(...glyphPath.commands);
-    x += glyph.advanceWidth * scale;
-    if (index < glyphs.length - 1) x += tracking;
+  const lineWidths = lines.map((line) => {
+    let w = 0;
+    const glyphs = font.stringToGlyphs(line);
+    glyphs.forEach((glyph, index) => {
+      w += glyph.advanceWidth * scale;
+      if (index < glyphs.length - 1) w += tracking;
+    });
+    return w;
+  });
+
+  const maxWidth = Math.max(...lineWidths, 0);
+
+  lines.forEach((line, lineIndex) => {
+    let lineX = originX;
+    if (align === "center") {
+      lineX += (maxWidth - lineWidths[lineIndex]) / 2;
+    } else if (align === "right") {
+      lineX += maxWidth - lineWidths[lineIndex];
+    }
+
+    let x = lineX;
+    let y = baselineY + lineIndex * lineHeight;
+
+    const glyphs = font.stringToGlyphs(line);
+    glyphs.forEach((glyph, index) => {
+      const glyphPath = glyph.getPath(x, y, fontSize);
+      commands.push(...glyphPath.commands);
+      x += glyph.advanceWidth * scale;
+      if (index < glyphs.length - 1) x += tracking;
+    });
   });
 
   const path = new opentype.Path();
@@ -197,7 +236,7 @@ function getTextPath(
   return path.toPathData(4);
 }
 
-function fitFontSize(font, text, padW, padH, tracking) {
+function fitFontSize(font, text, padW, padH, tracking, lineSpacing, align) {
   const targetW = padW * 0.8;
   const targetH = padH * 0.8;
   let lo = 0.1;
@@ -206,7 +245,7 @@ function fitFontSize(font, text, padW, padH, tracking) {
   // Binary search gives the largest size that still fits inside the usable pad area.
   for (let i = 0; i < 34; i++) {
     const mid = (lo + hi) / 2;
-    const pathData = getTextPath(font, text, mid, tracking);
+    const pathData = getTextPath(font, text, mid, tracking, lineSpacing, align);
     const bounds = pathBounds(pathData);
     const fits = bounds.width <= targetW && bounds.height <= targetH;
 
@@ -246,6 +285,13 @@ function makeSvg() {
     ranges.trackingMin,
     ranges.trackingMax,
   );
+  const lineSpacing = clampNumber(
+    els.lineSpacing.value,
+    defaults.lineSpacing,
+    ranges.lineSpacingMin,
+    ranges.lineSpacingMax,
+  );
+  const align = els.textAlign.value || defaults.textAlign;
 
   let fontSize = clampNumber(
     els.fontSize.value,
@@ -255,7 +301,15 @@ function makeSvg() {
   );
 
   if (els.autoFont.checked) {
-    fontSize = fitFontSize(state.font, text, padW, padH, tracking);
+    fontSize = fitFontSize(
+      state.font,
+      text,
+      padW,
+      padH,
+      tracking,
+      lineSpacing,
+      align,
+    );
     els.fontSize.value = fontSize.toFixed(2);
   }
 
@@ -267,7 +321,14 @@ function makeSvg() {
   const cutY = bleed;
   const centreX = outerW / 2;
   const centreY = outerH / 2;
-  const rawTextPath = getTextPath(state.font, text, fontSize, tracking);
+  const rawTextPath = getTextPath(
+    state.font,
+    text,
+    fontSize,
+    tracking,
+    lineSpacing,
+    align,
+  );
   const bounds = pathBounds(rawTextPath);
   const textOriginX = centreX - (bounds.minX + bounds.width / 2);
   const textBaselineY = centreY - (bounds.minY + bounds.height / 2);
@@ -276,6 +337,8 @@ function makeSvg() {
     text,
     fontSize,
     tracking,
+    lineSpacing,
+    align,
     textOriginX,
     textBaselineY,
   );
@@ -350,15 +413,22 @@ function resetDefaults() {
   loadFont();
 }
 
-[els.text, els.padW, els.padH, els.bleed, els.fontSize, els.tracking].forEach(
-  (el) => el.addEventListener("input", makeSvg),
-);
+[
+  els.text,
+  els.padW,
+  els.padH,
+  els.bleed,
+  els.fontSize,
+  els.tracking,
+  els.lineSpacing,
+].forEach((el) => el.addEventListener("input", makeSvg));
 
 els.autoFont.addEventListener("change", () => {
   els.fontSize.disabled = els.autoFont.checked;
   makeSvg();
 });
 
+els.textAlign.addEventListener("change", makeSvg);
 els.fontChoice.addEventListener("change", loadFont);
 els.download.addEventListener("click", downloadSvg);
 els.reset.addEventListener("click", resetDefaults);
