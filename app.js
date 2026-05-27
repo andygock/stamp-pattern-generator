@@ -130,6 +130,12 @@ const state = {
   fontName: APP_CONFIG.fonts[APP_CONFIG.defaults.fontChoice].label,
   svg: "",
   metrics: null,
+  unionMode: "none",
+};
+
+const GEOMETRY_CONFIG = {
+  clipperScale: 10000,
+  curveTolerance: 0.02,
 };
 
 function setStatus(message, isError = false) {
@@ -184,7 +190,13 @@ function pathBounds(pathData) {
   };
 }
 
-function getTextPath(
+function pathDataFromCommands(commands) {
+  const path = new opentype.Path();
+  path.commands = commands;
+  return path.toPathData(4);
+}
+
+function getTextGlyphCommands(
   font,
   text,
   fontSize,
@@ -197,7 +209,7 @@ function getTextPath(
   const scale = fontSize / font.unitsPerEm;
   const lines = text.split(/\r?\n/);
   const lineHeight = fontSize * lineSpacing;
-  const commands = [];
+  const glyphCommands = [];
 
   const lineWidths = lines.map((line) => {
     let w = 0;
@@ -225,15 +237,249 @@ function getTextPath(
     const glyphs = font.stringToGlyphs(line);
     glyphs.forEach((glyph, index) => {
       const glyphPath = glyph.getPath(x, y, fontSize);
-      commands.push(...glyphPath.commands);
+      if (glyphPath.commands.length) glyphCommands.push(glyphPath.commands);
       x += glyph.advanceWidth * scale;
       if (index < glyphs.length - 1) x += tracking;
     });
   });
 
-  const path = new opentype.Path();
-  path.commands = commands;
-  return path.toPathData(4);
+  return glyphCommands;
+}
+
+function getTextCommands(...args) {
+  return getTextGlyphCommands(...args).flat();
+}
+
+function getTextPath(...args) {
+  return pathDataFromCommands(getTextCommands(...args));
+}
+
+function distanceToLine(point, lineStart, lineEnd) {
+  const dx = lineEnd.x - lineStart.x;
+  const dy = lineEnd.y - lineStart.y;
+  const lenSq = dx * dx + dy * dy;
+
+  if (lenSq === 0) {
+    return Math.hypot(point.x - lineStart.x, point.y - lineStart.y);
+  }
+
+  return Math.abs(
+    dy * point.x -
+      dx * point.y +
+      lineEnd.x * lineStart.y -
+      lineEnd.y * lineStart.x,
+  ) / Math.sqrt(lenSq);
+}
+
+function lerpPoint(a, b) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
+function flattenQuadratic(p0, p1, p2, points, tolerance, depth = 0) {
+  if (depth > 12 || distanceToLine(p1, p0, p2) <= tolerance) {
+    points.push(p2);
+    return;
+  }
+
+  const p01 = lerpPoint(p0, p1);
+  const p12 = lerpPoint(p1, p2);
+  const p012 = lerpPoint(p01, p12);
+  flattenQuadratic(p0, p01, p012, points, tolerance, depth + 1);
+  flattenQuadratic(p012, p12, p2, points, tolerance, depth + 1);
+}
+
+function flattenCubic(p0, p1, p2, p3, points, tolerance, depth = 0) {
+  const flatness = Math.max(
+    distanceToLine(p1, p0, p3),
+    distanceToLine(p2, p0, p3),
+  );
+
+  if (depth > 12 || flatness <= tolerance) {
+    points.push(p3);
+    return;
+  }
+
+  const p01 = lerpPoint(p0, p1);
+  const p12 = lerpPoint(p1, p2);
+  const p23 = lerpPoint(p2, p3);
+  const p012 = lerpPoint(p01, p12);
+  const p123 = lerpPoint(p12, p23);
+  const p0123 = lerpPoint(p012, p123);
+  flattenCubic(p0, p01, p012, p0123, points, tolerance, depth + 1);
+  flattenCubic(p0123, p123, p23, p3, points, tolerance, depth + 1);
+}
+
+function closeEnough(a, b) {
+  return Math.abs(a.x - b.x) < 1e-8 && Math.abs(a.y - b.y) < 1e-8;
+}
+
+function intPoint(point) {
+  const scale = GEOMETRY_CONFIG.clipperScale;
+  return {
+    X: Math.round(point.x * scale),
+    Y: Math.round(point.y * scale),
+  };
+}
+
+function commandsToClipperPaths(commands) {
+  const paths = [];
+  let contour = [];
+  let current = { x: 0, y: 0 };
+  let start = null;
+
+  const finishContour = () => {
+    if (contour.length > 2) {
+      if (closeEnough(contour[0], contour[contour.length - 1])) contour.pop();
+      if (contour.length > 2) paths.push(contour.map(intPoint));
+    }
+    contour = [];
+    start = null;
+  };
+
+  commands.forEach((command) => {
+    if (command.type === "M") {
+      finishContour();
+      current = { x: command.x, y: command.y };
+      start = current;
+      contour.push(current);
+      return;
+    }
+
+    if (!start) return;
+
+    if (command.type === "L") {
+      current = { x: command.x, y: command.y };
+      contour.push(current);
+    } else if (command.type === "Q") {
+      const next = { x: command.x, y: command.y };
+      flattenQuadratic(
+        current,
+        { x: command.x1, y: command.y1 },
+        next,
+        contour,
+        GEOMETRY_CONFIG.curveTolerance,
+      );
+      current = next;
+    } else if (command.type === "C") {
+      const next = { x: command.x, y: command.y };
+      flattenCubic(
+        current,
+        { x: command.x1, y: command.y1 },
+        { x: command.x2, y: command.y2 },
+        next,
+        contour,
+        GEOMETRY_CONFIG.curveTolerance,
+      );
+      current = next;
+    } else if (command.type === "Z") {
+      if (!closeEnough(current, start)) contour.push(start);
+      finishContour();
+      current = start || current;
+    }
+  });
+
+  finishContour();
+  return paths;
+}
+
+function clipperPathsToPathData(paths) {
+  const scale = GEOMETRY_CONFIG.clipperScale;
+  return paths
+    .filter((path) => path.length > 2)
+    .map((path) => {
+      const [first, ...rest] = path;
+      const commands = [
+        `M ${(first.X / scale).toFixed(4)} ${(first.Y / scale).toFixed(4)}`,
+        ...rest.map(
+          (point) =>
+            `L ${(point.X / scale).toFixed(4)} ${(point.Y / scale).toFixed(4)}`,
+        ),
+        "Z",
+      ];
+      return commands.join(" ");
+    })
+    .join(" ");
+}
+
+function unionTextPath(commands) {
+  const paperPath = unionTextPathWithPaper(commands);
+  if (paperPath) {
+    state.unionMode = "curve";
+    return paperPath;
+  }
+
+  const flatCommands = Array.isArray(commands[0]) ? commands.flat() : commands;
+  if (!window.ClipperLib) {
+    state.unionMode = "unavailable";
+    return pathDataFromCommands(flatCommands);
+  }
+
+  const paths = commandsToClipperPaths(flatCommands);
+  if (!paths.length) return "";
+
+  const union = ClipperLib.Clipper.SimplifyPolygons(
+    paths,
+    ClipperLib.PolyFillType.pftNonZero,
+  );
+  state.unionMode = "polygon fallback";
+  return clipperPathsToPathData(union);
+}
+
+function ensurePaperProject() {
+  if (!window.paper) return false;
+  if (!paper.project) paper.setup(new paper.Size(1, 1));
+  paper.project.clear();
+  return true;
+}
+
+function paperItemToPathData(item) {
+  if (item.pathData) return item.pathData;
+
+  const svg = item.exportSVG({ asString: true, precision: 4 });
+  const match = svg.match(/\sd="([^"]+)"/);
+  return match ? match[1] : "";
+}
+
+function unionTextPathWithPaper(commands) {
+  try {
+    if (!ensurePaperProject()) return "";
+
+    const glyphPaths = Array.isArray(commands[0]) ? commands : [commands];
+    const items = glyphPaths
+      .map((glyphCommands) => {
+        const pathData = pathDataFromCommands(glyphCommands);
+        if (!pathData) return null;
+
+        const item = new paper.CompoundPath({
+          pathData,
+          insert: false,
+        });
+        item.fillRule = "nonzero";
+        return item;
+      })
+      .filter(Boolean);
+
+    if (!items.length) return "";
+
+    let union = items.shift();
+    items.forEach((item) => {
+      const next = union.unite(item, { insert: false });
+      union.remove();
+      item.remove();
+      union = next;
+    });
+
+    union.fillRule = "nonzero";
+    const pathData = paperItemToPathData(union);
+    union.remove();
+    return pathData;
+  } catch (err) {
+    console.warn("Curve union failed; falling back to polygon union.", err);
+    return "";
+  }
 }
 
 function fitFontSize(font, text, padW, padH, tracking, lineSpacing, align) {
@@ -332,7 +578,7 @@ function makeSvg() {
   const bounds = pathBounds(rawTextPath);
   const textOriginX = centreX - (bounds.minX + bounds.width / 2);
   const textBaselineY = centreY - (bounds.minY + bounds.height / 2);
-  const centredTextPath = getTextPath(
+  const centredGlyphCommands = getTextGlyphCommands(
     state.font,
     text,
     fontSize,
@@ -342,6 +588,7 @@ function makeSvg() {
     textOriginX,
     textBaselineY,
   );
+  const centredTextPath = unionTextPath(centredGlyphCommands);
 
   const outerRectPath = [
     `M ${outerX.toFixed(4)} ${outerY.toFixed(4)}`,
@@ -351,7 +598,7 @@ function makeSvg() {
     "Z",
   ].join(" ");
 
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outerW.toFixed(3)}mm" height="${outerH.toFixed(3)}mm" viewBox="0 0 ${outerW.toFixed(4)} ${outerH.toFixed(4)}">\n  <title>Negative stamp pad pattern ${escapeXml(text)}</title>\n  <desc>Black is engraving. Red hairline rectangle is the normal pad cut outline. Text is converted to paths and subtracted from the black filled pad using evenodd fill.</desc>\n  <g id="engrave-black" fill="#000000" stroke="none" fill-rule="evenodd">\n    <path d="${outerRectPath} ${centredTextPath}"/>\n  </g>\n  <g id="cut-red" fill="none" stroke="#ff0000" stroke-width="0.05" vector-effect="non-scaling-stroke">\n    <rect x="${cutX.toFixed(4)}" y="${cutY.toFixed(4)}" width="${padW.toFixed(4)}" height="${padH.toFixed(4)}"/>\n  </g>\n</svg>`;
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outerW.toFixed(3)}mm" height="${outerH.toFixed(3)}mm" viewBox="0 0 ${outerW.toFixed(4)} ${outerH.toFixed(4)}">\n  <title>Negative stamp pad pattern ${escapeXml(text)}</title>\n  <desc>Black is engraving. Red hairline rectangle is the normal pad cut outline. Text outlines are unioned before subtraction from the black filled pad.</desc>\n  <g id="engrave-black" fill="#000000" stroke="none" fill-rule="evenodd">\n    <path d="${outerRectPath} ${centredTextPath}"/>\n  </g>\n  <g id="cut-red" fill="none" stroke="#ff0000" stroke-width="0.05" vector-effect="non-scaling-stroke">\n    <rect x="${cutX.toFixed(4)}" y="${cutY.toFixed(4)}" width="${padW.toFixed(4)}" height="${padH.toFixed(4)}"/>\n  </g>\n</svg>`;
 
   state.svg = svg;
   state.metrics = { text, padW, padH, bleed, outerW, outerH, fontSize };
@@ -362,7 +609,7 @@ function makeSvg() {
   els.download.disabled = false;
   els.dims.textContent = `pad ${padW.toFixed(2)} × ${padH.toFixed(2)} mm, engrave ${outerW.toFixed(2)} × ${outerH.toFixed(2)} mm`;
   setStatus(
-    `Font: ${state.fontName}\nText outlined: yes\nAuto font size: ${els.autoFont.checked ? "yes" : "no"}\nFont size: ${fontSize.toFixed(2)} mm\nCut stroke: red 0.05 mm`,
+    `Font: ${state.fontName}\nText outlined: yes\nOutline union: ${state.unionMode}\nAuto font size: ${els.autoFont.checked ? "yes" : "no"}\nFont size: ${fontSize.toFixed(2)} mm\nCut stroke: red 0.05 mm`,
   );
 }
 
