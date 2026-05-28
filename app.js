@@ -10,6 +10,7 @@ const APP_CONFIG = {
     lineSpacing: 1.0,
     fontChoice: "roboto",
     textAlign: "center",
+    flipOutput: true,
   },
   ranges: {
     textMaxLength: 200,
@@ -69,6 +70,7 @@ const els = {
   lineSpacing: document.getElementById("lineSpacing"),
   fontChoice: document.getElementById("fontChoice"),
   textAlign: document.getElementById("textAlign"),
+  flipOutput: document.getElementById("flipOutput"),
   preview: document.getElementById("preview"),
   status: document.getElementById("status"),
   dims: document.getElementById("dims"),
@@ -122,6 +124,7 @@ function applyDefaults() {
 
   els.fontChoice.value = defaults.fontChoice;
   els.textAlign.value = defaults.textAlign;
+  els.flipOutput.checked = defaults.flipOutput;
   els.fontSize.disabled = defaults.autoFont;
 }
 
@@ -538,6 +541,7 @@ function makeSvg() {
     ranges.lineSpacingMax,
   );
   const align = els.textAlign.value || defaults.textAlign;
+  const flipOutput = els.flipOutput.checked;
 
   let fontSize = clampNumber(
     els.fontSize.value,
@@ -598,7 +602,10 @@ function makeSvg() {
     "Z",
   ].join(" ");
 
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outerW.toFixed(3)}mm" height="${outerH.toFixed(3)}mm" viewBox="0 0 ${outerW.toFixed(4)} ${outerH.toFixed(4)}">\n  <title>Negative stamp pad pattern ${escapeXml(text)}</title>\n  <desc>Black is engraving. Red hairline rectangle is the normal pad cut outline. Text outlines are unioned before subtraction from the black filled pad.</desc>\n  <g id="engrave-black" fill="#000000" stroke="none" fill-rule="evenodd">\n    <path d="${outerRectPath} ${centredTextPath}"/>\n  </g>\n  <g id="cut-red" fill="none" stroke="#ff0000" stroke-width="0.05" vector-effect="non-scaling-stroke">\n    <rect x="${cutX.toFixed(4)}" y="${cutY.toFixed(4)}" width="${padW.toFixed(4)}" height="${padH.toFixed(4)}"/>\n  </g>\n</svg>`;
+  const layerTransform = flipOutput
+    ? ` transform="translate(${outerW.toFixed(4)} 0) scale(-1 1)"`
+    : "";
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${outerW.toFixed(3)}mm" height="${outerH.toFixed(3)}mm" viewBox="0 0 ${outerW.toFixed(4)} ${outerH.toFixed(4)}">\n  <title>Negative stamp pad pattern ${escapeXml(text)}</title>\n  <desc>Black is engraving. Red hairline rectangle is the normal pad cut outline. Text outlines are unioned before subtraction from the black filled pad. Output is ${flipOutput ? "flipped left-right" : "not flipped"}.</desc>\n  <g id="output"${layerTransform}>\n    <g id="engrave-black" fill="#000000" stroke="none" fill-rule="evenodd">\n      <path d="${outerRectPath} ${centredTextPath}"/>\n    </g>\n    <g id="cut-red" fill="none" stroke="#ff0000" stroke-width="0.05" vector-effect="non-scaling-stroke">\n      <rect x="${cutX.toFixed(4)}" y="${cutY.toFixed(4)}" width="${padW.toFixed(4)}" height="${padH.toFixed(4)}"/>\n    </g>\n  </g>\n</svg>`;
 
   state.svg = svg;
   state.metrics = { text, padW, padH, bleed, outerW, outerH, fontSize };
@@ -609,7 +616,7 @@ function makeSvg() {
   els.download.disabled = false;
   els.dims.textContent = `pad ${padW.toFixed(2)} × ${padH.toFixed(2)} mm, engrave ${outerW.toFixed(2)} × ${outerH.toFixed(2)} mm`;
   setStatus(
-    `Font: ${state.fontName}\nText outlined: yes\nOutline union: ${state.unionMode}\nAuto font size: ${els.autoFont.checked ? "yes" : "no"}\nFont size: ${fontSize.toFixed(2)} mm\nCut stroke: red 0.05 mm`,
+    `Font: ${state.fontName}\nText outlined: yes\nOutline union: ${state.unionMode}\nAuto font size: ${els.autoFont.checked ? "yes" : "no"}\nFont size: ${fontSize.toFixed(2)} mm\nFlip output: ${flipOutput ? "yes" : "no"}\nCut stroke: red 0.05 mm`,
   );
 }
 
@@ -676,6 +683,7 @@ els.autoFont.addEventListener("change", () => {
 });
 
 els.textAlign.addEventListener("change", makeSvg);
+els.flipOutput.addEventListener("change", makeSvg);
 els.fontChoice.addEventListener("change", loadFont);
 els.download.addEventListener("click", downloadSvg);
 els.reset.addEventListener("click", resetDefaults);
